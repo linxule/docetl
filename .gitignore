@@ -53,3 +53,10 @@ website/next-env.d.ts
 
 # Docker
 .docker/
+
+# local working files
+intermediate_results/*  
+dao-proposals/*
+pipeline.yaml
+.vscode/settings.json
+pipeline_test.yaml
