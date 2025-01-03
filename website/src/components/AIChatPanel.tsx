@@ -8,7 +8,7 @@ import React, {
   useCallback,
 } from "react";
 import { ResizableBox } from "react-resizable";
-import { RefreshCw, X, Copy } from "lucide-react";
+import { RefreshCw, X, Copy, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -26,9 +26,18 @@ import {
 } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { debounce } from "lodash";
+import { toast } from "@/hooks/use-toast";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 
 interface AIChatPanelProps {
   onClose: () => void;
+}
+
+interface Message {
+  role: "user" | "assistant" | "system";
+  content: string;
+  id: string;
 }
 
 const DEFAULT_SUGGESTIONS = [
@@ -39,13 +48,41 @@ const DEFAULT_SUGGESTIONS = [
 ];
 
 const AIChatPanel: React.FC<AIChatPanelProps> = ({ onClose }) => {
+  const {
+    serializeState,
+    highLevelGoal,
+    setHighLevelGoal,
+    apiKeys,
+    namespace,
+  } = usePipelineContext();
   const [position, setPosition] = useState({
-    x: window.innerWidth - 400,
+    x: window.innerWidth - 600,
     y: 80,
   });
   const isDragging = useRef(false);
   const dragOffset = useRef({ x: 0, y: 0 });
   const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [usePersonalOpenAI, setUsePersonalOpenAI] = useState(false);
+
+  const openAiKey = useMemo(() => {
+    const key = apiKeys.find((key) => key.name === "OPENAI_API_KEY")?.value;
+    console.log("Chat Panel: OpenAI key present:", !!key);
+    return key;
+  }, [apiKeys]);
+
+  const chatHeaders = useMemo(() => {
+    const headers: Record<string, string> = {};
+    if (usePersonalOpenAI) {
+      headers["x-use-openai"] = "true";
+      if (openAiKey) {
+        headers["x-openai-key"] = openAiKey;
+      }
+    }
+    headers["x-namespace"] = namespace;
+    return headers;
+  }, [openAiKey, usePersonalOpenAI, namespace]);
+
   const {
     messages,
     setMessages,
@@ -53,14 +90,32 @@ const AIChatPanel: React.FC<AIChatPanelProps> = ({ onClose }) => {
     handleInputChange,
     handleSubmit,
     isLoading,
+    error: chatError,
   } = useChat({
     api: "/api/chat",
     initialMessages: [],
     id: "persistent-chat",
+    headers: {
+      ...chatHeaders,
+      "x-source": "ai_chat",
+    },
+    onError: (error) => {
+      console.error("Chat error:", error);
+      setError(error.message);
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
   });
-  const { serializeState, highLevelGoal, setHighLevelGoal } =
-    usePipelineContext();
+
   const [localGoal, setLocalGoal] = useState(highLevelGoal);
+
+  const hasOpenAIKey = useMemo(() => {
+    if (!usePersonalOpenAI) return true;
+    return apiKeys.some((key) => key.name === "OPENAI_API_KEY");
+  }, [apiKeys, usePersonalOpenAI]);
 
   const handleMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if ((e.target as HTMLElement).classList.contains("drag-handle")) {
@@ -77,7 +132,7 @@ const AIChatPanel: React.FC<AIChatPanelProps> = ({ onClose }) => {
       setPosition({
         x: Math.max(
           0,
-          Math.min(window.innerWidth - 400, e.clientX - dragOffset.current.x)
+          Math.min(window.innerWidth - 600, e.clientX - dragOffset.current.x)
         ),
         y: Math.max(
           0,
@@ -110,18 +165,31 @@ const AIChatPanel: React.FC<AIChatPanelProps> = ({ onClose }) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
 
+    console.log("📝 Submitting message with API key present:", !!openAiKey);
+
+    setError(null);
+
+    if (!hasOpenAIKey && !usePersonalOpenAI) {
+      toast({
+        title: "OpenAI API Key Required",
+        description: "Please add your OpenAI API key in Edit > Edit API Keys",
+        variant: "destructive",
+      });
+      return;
+    }
+
     const pipelineState = await serializeState();
 
     setMessages([
       {
         id: String(Date.now()),
         role: "system",
-        content: `You are the DocETL assistant, helping users build and refine data analysis pipelines. You are an expert at data analysis.
+        content: `You are the DocWrangler assistant, helping users build and refine data analysis pipelines. You are an expert at data analysis.
 
 Core Capabilities:
-- DocETL enables users to create sophisticated data processing workflows with LLM calls, like crowdsourcing pipelines
+- DocWrangler is an interface that enables users to create sophisticated data processing workflows with LLM calls, like crowdsourcing pipelines. It uses the DocETL DSL and query engine.
 - Each pipeline processes documents through a sequence of operations
-- Operations can be LLM-based (map, reduce, resolve, filter) or utility-based (unnest, split, gather, sample) or code-based (python for map, reduce, and filter)
+- DocETL Operations can be LLM-based (map, reduce, resolve, filter) or utility-based (unnest, split, gather, sample) or code-based (python for map, reduce, and filter)
 
 Operation Details:
 - Every LLM operation has:
@@ -228,22 +296,38 @@ Remember, all the output fields have been converted to strings, even if they wer
       }}
     >
       <ResizableBox
-        width={400}
+        width={600}
         height={500}
-        minConstraints={[300, 400]}
-        maxConstraints={[800, 800]}
+        minConstraints={[400, 400]}
+        maxConstraints={[1000, 800]}
         resizeHandles={["sw", "se"]}
         className="bg-white rounded-lg shadow-lg border overflow-hidden text-s"
       >
         <div
-          className="h-6 bg-gray-100 drag-handle flex justify-between items-center px-2 cursor-move"
+          className="h-8 bg-gray-100 drag-handle flex justify-between items-center px-3 cursor-move select-none"
           onMouseDown={handleMouseDown}
         >
-          <span className="text-s text-primary font-medium flex items-center gap-2">
-            <Scroll size={12} />
+          <span className="text-s text-primary font-medium flex items-center gap-3">
+            <span className="pointer-events-none">
+              <Scroll size={14} />
+            </span>
             <LLMContextPopover />
           </span>
-          <div className="flex items-center gap-1">
+          <div className="flex items-center gap-2 pointer-events-auto">
+            <div className="flex items-center gap-1.5 border-r pr-2">
+              <Switch
+                id="use-personal-openai"
+                checked={usePersonalOpenAI}
+                onCheckedChange={setUsePersonalOpenAI}
+                className="h-4 w-7 data-[state=checked]:bg-primary"
+              />
+              <Label
+                htmlFor="use-personal-openai"
+                className="text-[10px] text-muted-foreground whitespace-nowrap"
+              >
+                Personal OpenAI Key
+              </Label>
+            </div>
             <Popover>
               <PopoverTrigger asChild>
                 <span className="text-s text-primary font-medium flex items-center gap-2 cursor-pointer">
@@ -292,9 +376,34 @@ Remember, all the output fields have been converted to strings, even if they wer
         </div>
         <div className="flex flex-col h-[calc(100%-24px)]">
           <ScrollArea ref={scrollAreaRef} className="flex-1 p-4">
+            {error && (
+              <div className="bg-destructive/10 text-destructive rounded-md p-3 mb-2 text-xs">
+                <div className="flex gap-2">
+                  <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium">Error</p>
+                    <p className="mt-1">{error}</p>
+                  </div>
+                </div>
+              </div>
+            )}
             {messages.filter((message) => message.role !== "system").length ===
             0 ? (
               <div className="flex flex-col gap-2">
+                {usePersonalOpenAI && !hasOpenAIKey && (
+                  <div className="bg-destructive/10 text-destructive rounded-md p-3 mb-2 text-xs">
+                    <div className="flex gap-2">
+                      <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-medium">OpenAI API Key Required</p>
+                        <p className="mt-1">
+                          To use your personal OpenAI account, please add your
+                          OpenAI API key in Edit {">"} Edit API Keys.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 {DEFAULT_SUGGESTIONS.map((suggestion, index) => (
                   <Button
                     key={index}
@@ -374,13 +483,20 @@ Remember, all the output fields have been converted to strings, even if they wer
             <Input
               value={input}
               onChange={handleInputChange}
-              placeholder="Ask a question..."
+              placeholder={
+                error
+                  ? "Try again..."
+                  : !hasOpenAIKey && !usePersonalOpenAI
+                  ? "Add OpenAI API key to continue..."
+                  : "Ask a question..."
+              }
               className="flex-1 text-s h-7"
+              disabled={!hasOpenAIKey && !usePersonalOpenAI}
             />
             <Button
               type="submit"
               size="sm"
-              disabled={isLoading}
+              disabled={isLoading || (!hasOpenAIKey && !usePersonalOpenAI)}
               className="h-7 text-s text-white"
             >
               Send

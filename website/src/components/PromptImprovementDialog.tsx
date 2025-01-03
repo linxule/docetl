@@ -1,4 +1,10 @@
-import React, { useState, useCallback, useEffect, useRef } from "react";
+import React, {
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+  useMemo,
+} from "react";
 import { useChat } from "ai/react";
 import { Operation } from "@/app/types";
 import { Button } from "@/components/ui/button";
@@ -17,7 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, ArrowLeft } from "lucide-react";
+import { Loader2, ArrowLeft, AlertCircle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { usePipelineContext } from "@/contexts/PipelineContext";
 import { useBookmarkContext } from "@/contexts/BookmarkContext";
@@ -28,6 +34,19 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { toast } from "@/hooks/use-toast";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 
 type Step = "select" | "analyze";
 
@@ -416,8 +435,9 @@ export function PromptImprovementDialog({
   currentOperation,
   onSave,
 }: PromptImprovementDialogProps) {
-  const { operations, serializeState } = usePipelineContext();
-  const { bookmarks } = useBookmarkContext();
+  const { operations, serializeState, apiKeys, namespace } =
+    usePipelineContext();
+  const { bookmarks, removeBookmark } = useBookmarkContext();
   const [step, setStep] = useState<Step>("select");
   const [selectedOperationId, setSelectedOperationId] = useState<string>(
     currentOperation.id
@@ -434,6 +454,10 @@ export function PromptImprovementDialog({
   const [expectingNewRevision, setExpectingNewRevision] = useState(false);
   const [chatKey, setChatKey] = useState(0);
   const [localFeedbackText, setLocalFeedbackText] = useState("");
+  const [showSaveConfirm, setShowSaveConfirm] = useState(false);
+  const [usePersonalOpenAI, setUsePersonalOpenAI] = useState(false);
+  const [ignoreMissingKey, setIgnoreMissingKey] = useState(false);
+  const [additionalInstructions, setAdditionalInstructions] = useState("");
 
   const selectedOperation = operations.find(
     (op) => op.id === selectedOperationId
@@ -447,13 +471,51 @@ export function PromptImprovementDialog({
       )
     : [];
 
-  const { messages, isLoading, append, setMessages } = useChat({
+  const chatHeaders = useMemo(() => {
+    const headers: Record<string, string> = {};
+    if (usePersonalOpenAI) {
+      const openAiKey = apiKeys.find(
+        (key) => key.name === "OPENAI_API_KEY"
+      )?.value;
+      // Add the use-openai header even if no personal key is found
+      headers["x-use-openai"] = "true";
+      if (openAiKey) {
+        headers["x-openai-key"] = openAiKey;
+      }
+    }
+    headers["x-namespace"] = namespace;
+    return headers;
+  }, [apiKeys, usePersonalOpenAI, namespace]);
+
+  const {
+    messages,
+    setMessages,
+    input,
+    handleInputChange,
+    handleSubmit,
+    isLoading,
+    append,
+    error: chatError,
+  } = useChat({
     api: "/api/chat",
-    id: `prompt-improvement-${chatKey}`,
-    onFinish: () => {
-      // Optional: handle completion
+    headers: {
+      ...chatHeaders,
+      "x-source": "prompt_improvement",
+    },
+    onError: (error) => {
+      console.error("Chat error:", error);
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
     },
   });
+
+  const hasOpenAIKey = useMemo(() => {
+    if (!usePersonalOpenAI) return true;
+    return apiKeys.some((key) => key.name === "OPENAI_API_KEY");
+  }, [apiKeys, usePersonalOpenAI]);
 
   // Update the effect that handles new messages
   useEffect(() => {
@@ -560,7 +622,16 @@ export function PromptImprovementDialog({
   }, [selectedRevisionIndex, revisions]);
 
   const handleImprove = useCallback(async () => {
-    setExpectingNewRevision(true); // Set flag before getting first response
+    if (!hasOpenAIKey && !usePersonalOpenAI) {
+      toast({
+        title: "OpenAI API Key Required",
+        description: "Please add your OpenAI API key in Edit > Edit API Keys",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setExpectingNewRevision(true);
     setEditedPrompt(null);
     setStep("analyze");
     setRevisions([]);
@@ -579,6 +650,10 @@ export function PromptImprovementDialog({
             .join("\n")}`
         : "\nNo feedback found for this operation.";
 
+    const instructionsSection = additionalInstructions
+      ? `\nAdditional Instructions:\n${additionalInstructions}`
+      : "";
+
     const pipelineState = await serializeState();
     const systemContent = getSystemContent(pipelineState, selectedOperation);
 
@@ -596,7 +671,18 @@ export function PromptImprovementDialog({
       role: "user",
       content: `Please analyze and improve my prompt${
         selectedOperation.type === "resolve" ? "s" : ""
-      }:${
+      } following these best practices:
+
+1. Be specific and unambiguous in instructions
+2. Break down complex tasks into steps
+3. Include examples where helpful
+4. Use clear formatting and structure
+5. Specify the desired output format
+6. Include relevant context and constraints
+7. Use consistent terminology
+8. Avoid vague or subjective language
+
+Here is the current prompt to improve:${
         selectedOperation.type === "resolve"
           ? `\nComparison prompt:\n${
               selectedOperation.otherKwargs?.comparison_prompt || ""
@@ -604,7 +690,7 @@ export function PromptImprovementDialog({
               selectedOperation.otherKwargs?.resolution_prompt || ""
             }`
           : `\n${selectedOperation.prompt}`
-      }${bookmarksSection}`,
+      }${bookmarksSection}${instructionsSection}`,
       id: "user-1",
     });
 
@@ -617,6 +703,9 @@ export function PromptImprovementDialog({
     append,
     setMessages,
     relevantBookmarks,
+    hasOpenAIKey,
+    usePersonalOpenAI,
+    additionalInstructions,
   ]);
 
   const handleBack = () => {
@@ -706,15 +795,7 @@ Remember to ${
   // Update the save handler
   const handleSave = () => {
     if (editedPrompt && selectedOperation) {
-      const lastMessage = messages[messages.length - 1];
-      const schemaChanges = lastMessage
-        ? extractSchemaChanges(lastMessage.content)
-        : [];
-      onSave(editedPrompt, schemaChanges);
-      setMessages([]);
-      setRevisions([]);
-      onOpenChange(false);
-      setStep("select"); // Reset to first screen
+      setShowSaveConfirm(true);
     }
   };
 
@@ -726,335 +807,464 @@ Remember to ${
     []
   );
 
+  // Add this new function to handle the actual save
+  const handleConfirmedSave = (shouldClearNotes: boolean) => {
+    if (editedPrompt && selectedOperation) {
+      const lastMessage = messages[messages.length - 1];
+      const schemaChanges = lastMessage
+        ? extractSchemaChanges(lastMessage.content)
+        : [];
+
+      if (shouldClearNotes) {
+        // Clear notes related to this operation
+        relevantBookmarks.forEach((note) => {
+          if (note.metadata?.operationName === selectedOperation.name) {
+            const bookmark = bookmarks.find((b) =>
+              b.notes.some((n) => n.id === note.id)
+            );
+            if (bookmark) {
+              removeBookmark(bookmark.id);
+            }
+          }
+        });
+      }
+
+      onSave(editedPrompt, schemaChanges);
+      setMessages([]);
+      setRevisions([]);
+      onOpenChange(false);
+      setStep("select");
+      setShowSaveConfirm(false);
+      setAdditionalInstructions("");
+    }
+  };
+
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="max-w-7xl h-[90vh] flex flex-col gap-4">
-        <DialogHeader className="flex-none">
-          <div className="flex items-center gap-4 mb-2">
-            {step === "analyze" && (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={handleBack}
-                className="h-6 w-6"
-              >
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-            )}
-            <DialogTitle>Rewrite Prompt</DialogTitle>
-          </div>
-          <div className="flex items-center gap-2 mt-2">
-            <div
-              className={`h-2 flex-1 rounded-full ${
-                step === "select" ? "bg-primary" : "bg-muted"
-              }`}
-            />
-            <div
-              className={`h-2 flex-1 rounded-full ${
-                step === "analyze" ? "bg-primary" : "bg-muted"
-              }`}
-            />
-          </div>
-          <DialogDescription className="mt-2">
-            {step === "select"
-              ? "Select an operation to improve its prompt"
-              : "DocETL is analyzing and suggesting improvements"}
-          </DialogDescription>
-        </DialogHeader>
-
-        <ScrollArea className="flex-1 w-full h-[calc(80vh-8rem)] overflow-y-auto">
-          {step === "select" ? (
-            <div className="flex flex-col gap-4 pr-4 pb-4">
-              <Select
-                value={selectedOperationId}
-                onValueChange={setSelectedOperationId}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select operation" />
-                </SelectTrigger>
-                <SelectContent>
-                  {operations
-                    .filter((op) => op.llmType === "LLM")
-                    .map((op) => (
-                      <SelectItem key={op.id} value={op.id}>
-                        {op.name}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-
-              {selectedOperation && (
-                <>
-                  <div className="text-sm">
-                    <div className="font-medium mb-2">
-                      Current Prompt
-                      {selectedOperation.type === "resolve" ? "s" : ""}:
-                    </div>
-                    {selectedOperation.type === "resolve" ? (
-                      <div className="space-y-4">
-                        <div>
-                          <div className="font-medium text-sm mb-1">
-                            Comparison Prompt:
-                          </div>
-                          <pre className="bg-muted p-2 rounded-md whitespace-pre-wrap">
-                            {selectedOperation.otherKwargs?.comparison_prompt ||
-                              ""}
-                          </pre>
-                        </div>
-                        <div>
-                          <div className="font-medium text-sm mb-1">
-                            Resolution Prompt:
-                          </div>
-                          <pre className="bg-muted p-2 rounded-md whitespace-pre-wrap">
-                            {selectedOperation.otherKwargs?.resolution_prompt ||
-                              ""}
-                          </pre>
-                        </div>
-                      </div>
-                    ) : (
-                      <pre className="bg-muted p-2 rounded-md whitespace-pre-wrap">
-                        {selectedOperation.prompt}
-                      </pre>
-                    )}
-                  </div>
-
-                  <div className="text-sm">
-                    <div className="font-medium mb-2">Feedback:</div>
-                    <div className="bg-muted p-2 rounded-md">
-                      {relevantBookmarks.length > 0 ? (
-                        <ul className="list-disc list-inside space-y-1">
-                          {relevantBookmarks.map((note, index) => (
-                            <li key={index}>{note.note}</li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p className="text-muted-foreground">
-                          No feedback or bookmarks found for this operation.
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </>
+    <>
+      <Dialog open={open} onOpenChange={handleClose}>
+        <DialogContent className="max-w-7xl h-[90vh] flex flex-col gap-4">
+          <DialogHeader className="flex-none">
+            <div className="flex items-center gap-4 mb-2">
+              {step === "analyze" && (
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleBack}
+                  className="h-6 w-6"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </Button>
               )}
+              <DialogTitle>Improve Prompt</DialogTitle>
 
-              <Button
-                onClick={handleImprove}
-                disabled={isLoading || !selectedOperation}
-                className="mt-4"
-              >
-                Continue to Analysis
-              </Button>
+              <div className="flex items-center gap-1.5 ml-auto">
+                <Switch
+                  id="use-personal-openai"
+                  checked={usePersonalOpenAI}
+                  onCheckedChange={setUsePersonalOpenAI}
+                  className="h-4 w-7 data-[state=checked]:bg-primary"
+                />
+                <Label
+                  htmlFor="use-personal-openai"
+                  className="text-[10px] text-muted-foreground whitespace-nowrap"
+                >
+                  Use Personal OpenAI API Key
+                </Label>
+              </div>
             </div>
-          ) : (
-            <div className="flex flex-col gap-4 pr-4 pb-4">
-              {messages.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-8">
-                  <Loader2 className="h-8 w-8 animate-spin mb-4" />
-                  <p className="text-sm text-muted-foreground">
-                    Starting analysis...
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <div className="border rounded-md p-4">
-                    {messages
-                      .filter((m) => m.role === "assistant")
-                      .slice(-1)
-                      .map((message, index) => (
-                        <div
-                          key={`${selectedRevisionIndex}-${index}`}
-                          className="prose prose-sm max-w-none relative"
+
+            <div className="flex items-center gap-2 mt-2">
+              <div
+                className={`h-2 flex-1 rounded-full ${
+                  step === "select" ? "bg-primary" : "bg-muted"
+                }`}
+              />
+              <div
+                className={`h-2 flex-1 rounded-full ${
+                  step === "analyze" ? "bg-primary" : "bg-muted"
+                }`}
+              />
+            </div>
+            <DialogDescription className="mt-2">
+              {step === "select"
+                ? "Select the operation you want to improve the prompt for"
+                : "DocWrangler is analyzing and suggesting improvements"}
+            </DialogDescription>
+          </DialogHeader>
+
+          <ScrollArea className="flex-1 w-full h-[calc(80vh-8rem)] overflow-y-auto">
+            {step === "select" ? (
+              <div className="flex flex-col gap-4 pr-4 pb-4">
+                {!hasOpenAIKey && usePersonalOpenAI && !ignoreMissingKey && (
+                  <div className="bg-destructive/10 text-destructive rounded-md p-3 mb-2 text-xs">
+                    <div className="flex gap-2">
+                      <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                      <div>
+                        <p className="font-medium">OpenAI API Key Required</p>
+                        <p className="mt-1">
+                          To use the AI assistant, please add your OpenAI API
+                          key in Edit {">"} Edit API Keys.
+                        </p>
+                        <button
+                          className="text-destructive underline hover:opacity-80 mt-1.5 font-medium"
+                          onClick={() => setIgnoreMissingKey(true)}
                         >
-                          <ReactMarkdown>
-                            {isLoading
-                              ? message.content
-                              : removePromptAndSchemaTags(message.content)}
-                          </ReactMarkdown>
-                          {isLoading && (
-                            <div className="absolute -right-2 -bottom-2">
-                              <Loader2 className="h-4 w-4 animate-spin" />
+                          Ignore if running locally with environment variables
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <Select
+                  value={selectedOperationId}
+                  onValueChange={setSelectedOperationId}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select operation" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {operations
+                      .filter((op) => op.llmType === "LLM")
+                      .map((op) => (
+                        <SelectItem key={op.id} value={op.id}>
+                          {op.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+
+                {selectedOperation && (
+                  <>
+                    <div className="space-y-6">
+                      <div className="text-sm">
+                        <div className="font-medium mb-2 text-foreground">
+                          Current Prompt
+                          {selectedOperation.type === "resolve" ? "s" : ""}:
+                        </div>
+                        {selectedOperation.type === "resolve" ? (
+                          <div className="space-y-4">
+                            <div>
+                              <div className="text-sm mb-1 text-muted-foreground">
+                                Comparison Prompt:
+                              </div>
+                              <pre className="bg-muted p-2 rounded-md whitespace-pre-wrap">
+                                {selectedOperation.otherKwargs
+                                  ?.comparison_prompt || ""}
+                              </pre>
                             </div>
+                            <div>
+                              <div className="text-sm mb-1 text-muted-foreground">
+                                Resolution Prompt:
+                              </div>
+                              <pre className="bg-muted p-2 rounded-md whitespace-pre-wrap">
+                                {selectedOperation.otherKwargs
+                                  ?.resolution_prompt || ""}
+                              </pre>
+                            </div>
+                          </div>
+                        ) : (
+                          <pre className="bg-muted p-2 rounded-md whitespace-pre-wrap">
+                            {selectedOperation.prompt}
+                          </pre>
+                        )}
+                      </div>
+
+                      <div className="text-sm">
+                        <div className="font-medium mb-2 text-foreground">
+                          Your Notes:
+                        </div>
+                        <div className="bg-muted p-3 rounded-md">
+                          {relevantBookmarks.length > 0 ? (
+                            <ul className="list-disc list-inside space-y-1">
+                              {relevantBookmarks.map((note, index) => (
+                                <li key={index}>{note.note}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="text-muted-foreground">
+                              No feedback or bookmarks found for this operation.
+                            </p>
                           )}
                         </div>
-                      ))}
-                  </div>
+                      </div>
 
-                  {!isLoading && editedPrompt && selectedOperation && (
-                    <>
-                      <div className="border rounded-md p-4">
-                        <h3 className="font-medium mb-2">Prompt Changes:</h3>
-                        {isDirectEditing ? (
-                          selectedOperation.type === "resolve" ? (
-                            <div className="space-y-4">
+                      <div className="text-sm">
+                        <div className="font-medium mb-2 text-muted-foreground flex items-center gap-2">
+                          Additional Instructions
+                          <span className="text-xs font-normal">
+                            (optional)
+                          </span>
+                        </div>
+                        <Textarea
+                          placeholder="Add specific instructions for improving the prompt (e.g., 'Make it more concise', 'Add more examples')"
+                          value={additionalInstructions}
+                          onChange={(e) =>
+                            setAdditionalInstructions(e.target.value)
+                          }
+                          className="h-24 resize-none"
+                        />
+                        {!additionalInstructions && (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Leave blank to let the AI follow default improvement
+                            guidelines
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    <Button
+                      onClick={handleImprove}
+                      disabled={
+                        isLoading ||
+                        !selectedOperation ||
+                        (!hasOpenAIKey &&
+                          usePersonalOpenAI &&
+                          !ignoreMissingKey)
+                      }
+                      className="mt-4"
+                    >
+                      Continue to Analysis
+                    </Button>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4 pr-4 pb-4">
+                {messages.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-8">
+                    <Loader2 className="h-8 w-8 animate-spin mb-4" />
+                    <p className="text-sm text-muted-foreground">
+                      Starting analysis...
+                    </p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="border rounded-md p-4">
+                      {messages
+                        .filter((m) => m.role === "assistant")
+                        .slice(-1)
+                        .map((message, index) => (
+                          <div
+                            key={`${selectedRevisionIndex}-${index}`}
+                            className="prose prose-sm max-w-none relative"
+                          >
+                            <ReactMarkdown>
+                              {isLoading
+                                ? message.content
+                                : removePromptAndSchemaTags(message.content)}
+                            </ReactMarkdown>
+                            {isLoading && (
+                              <div className="absolute -right-2 -bottom-2">
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                    </div>
+
+                    {!isLoading && editedPrompt && selectedOperation && (
+                      <>
+                        <div className="border rounded-md p-4">
+                          <h3 className="font-medium mb-2">Prompt Changes:</h3>
+                          {isDirectEditing ? (
+                            selectedOperation.type === "resolve" ? (
+                              <div className="space-y-4">
+                                <AutosizeTextarea
+                                  value={
+                                    typeof editedPrompt === "object"
+                                      ? editedPrompt.comparison_prompt
+                                      : ""
+                                  }
+                                  onChange={(e) =>
+                                    setEditedPrompt((prev) =>
+                                      typeof prev === "object"
+                                        ? {
+                                            ...prev,
+                                            comparison_prompt: e.target.value,
+                                          }
+                                        : prev
+                                    )
+                                  }
+                                  type="comparison"
+                                />
+                                <AutosizeTextarea
+                                  value={
+                                    typeof editedPrompt === "object"
+                                      ? editedPrompt.resolution_prompt
+                                      : ""
+                                  }
+                                  onChange={(e) =>
+                                    setEditedPrompt((prev) =>
+                                      typeof prev === "object"
+                                        ? {
+                                            ...prev,
+                                            resolution_prompt: e.target.value,
+                                          }
+                                        : prev
+                                    )
+                                  }
+                                  type="resolve"
+                                />
+                              </div>
+                            ) : (
                               <AutosizeTextarea
                                 value={
-                                  typeof editedPrompt === "object"
-                                    ? editedPrompt.comparison_prompt
+                                  typeof editedPrompt === "string"
+                                    ? editedPrompt
                                     : ""
                                 }
                                 onChange={(e) =>
-                                  setEditedPrompt((prev) =>
-                                    typeof prev === "object"
-                                      ? {
-                                          ...prev,
-                                          comparison_prompt: e.target.value,
-                                        }
-                                      : prev
-                                  )
+                                  setEditedPrompt(e.target.value)
                                 }
+                              />
+                            )
+                          ) : selectedOperation.type === "resolve" &&
+                            typeof editedPrompt === "object" ? (
+                            <div className="space-y-4">
+                              <DiffView
+                                oldText={
+                                  selectedOperation.otherKwargs
+                                    ?.comparison_prompt || ""
+                                }
+                                newText={editedPrompt.comparison_prompt}
                                 type="comparison"
                               />
-                              <AutosizeTextarea
-                                value={
-                                  typeof editedPrompt === "object"
-                                    ? editedPrompt.resolution_prompt
-                                    : ""
+                              <DiffView
+                                oldText={
+                                  selectedOperation.otherKwargs
+                                    ?.resolution_prompt || ""
                                 }
-                                onChange={(e) =>
-                                  setEditedPrompt((prev) =>
-                                    typeof prev === "object"
-                                      ? {
-                                          ...prev,
-                                          resolution_prompt: e.target.value,
-                                        }
-                                      : prev
-                                  )
-                                }
+                                newText={editedPrompt.resolution_prompt}
                                 type="resolve"
                               />
                             </div>
                           ) : (
-                            <AutosizeTextarea
-                              value={
+                            <DiffView
+                              oldText={selectedOperation.prompt || ""}
+                              newText={
                                 typeof editedPrompt === "string"
                                   ? editedPrompt
                                   : ""
                               }
-                              onChange={(e) => setEditedPrompt(e.target.value)}
                             />
-                          )
-                        ) : selectedOperation.type === "resolve" &&
-                          typeof editedPrompt === "object" ? (
-                          <div className="space-y-4">
-                            <DiffView
-                              oldText={
-                                selectedOperation.otherKwargs
-                                  ?.comparison_prompt || ""
-                              }
-                              newText={editedPrompt.comparison_prompt}
-                              type="comparison"
-                            />
-                            <DiffView
-                              oldText={
-                                selectedOperation.otherKwargs
-                                  ?.resolution_prompt || ""
-                              }
-                              newText={editedPrompt.resolution_prompt}
-                              type="resolve"
-                            />
-                          </div>
-                        ) : (
-                          <DiffView
-                            oldText={selectedOperation.prompt || ""}
-                            newText={
-                              typeof editedPrompt === "string"
-                                ? editedPrompt
-                                : ""
-                            }
+                          )}
+                        </div>
+
+                        {messages.length > 0 && (
+                          <SchemaChangesDiff
+                            changes={extractSchemaChanges(
+                              messages[messages.length - 1].content
+                            )}
                           />
                         )}
-                      </div>
 
-                      {messages.length > 0 && (
-                        <SchemaChangesDiff
-                          changes={extractSchemaChanges(
-                            messages[messages.length - 1].content
-                          )}
-                        />
-                      )}
-
-                      <div className="flex gap-2 justify-end">
-                        <Button
-                          variant="secondary"
-                          onClick={() => {
-                            if (isDirectEditing) {
-                              // When switching to diff view, save the changes first
-                              handleDirectEditComplete();
-                            } else {
-                              handleDirectEditStart();
-                            }
-                          }}
-                        >
-                          {isDirectEditing ? "See diff" : "Directly edit"}
-                        </Button>
-
-                        <Popover
-                          open={popoverOpen}
-                          onOpenChange={setPopoverOpen}
-                          modal
-                        >
-                          <PopoverTrigger asChild>
-                            <Button variant="secondary">Add feedback</Button>
-                          </PopoverTrigger>
-                          <PopoverContent
-                            className="w-[500px] max-h-[80vh]"
-                            side="left"
-                            align="start"
+                        <div className="flex gap-2 justify-end">
+                          <Button
+                            variant="secondary"
+                            onClick={() => {
+                              if (isDirectEditing) {
+                                // When switching to diff view, save the changes first
+                                handleDirectEditComplete();
+                              } else {
+                                handleDirectEditStart();
+                              }
+                            }}
                           >
-                            <div className="flex flex-col gap-2 h-full">
-                              <div className="flex-1 overflow-y-auto border-b max-h-[500px]">
-                                <div className="font-medium text-sm mb-1">
-                                  Revision History:
-                                </div>
-                                <div>
-                                  {buildRevisionTree(
-                                    revisions,
-                                    connections
-                                  ).map((node, index) => (
-                                    <RevisionTreeNode
-                                      key={index}
-                                      node={node}
-                                      selectedIndex={selectedRevisionIndex}
-                                      onSelect={handleRevisionSelect}
-                                    />
-                                  ))}
-                                </div>
-                              </div>
-                              <div className="flex-none pt-2">
-                                <Textarea
-                                  placeholder="What would you like to improve?"
-                                  value={localFeedbackText}
-                                  onChange={(e) => {
-                                    setLocalFeedbackText(e.target.value);
-                                    debouncedSetFeedback(e.target.value);
-                                  }}
-                                  className="min-h-[100px] mb-2"
-                                />
-                                <div className="flex justify-end">
-                                  <Button
-                                    onClick={handleFeedbackSubmit}
-                                    disabled={!localFeedbackText.trim()}
-                                  >
-                                    Submit Feedback
-                                  </Button>
-                                </div>
-                              </div>
-                            </div>
-                          </PopoverContent>
-                        </Popover>
+                            {isDirectEditing ? "See diff" : "Directly edit"}
+                          </Button>
 
-                        <Button onClick={handleSave} disabled={!editedPrompt}>
-                          Save and Overwrite
-                        </Button>
-                      </div>
-                    </>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-        </ScrollArea>
-      </DialogContent>
-    </Dialog>
+                          <Popover
+                            open={popoverOpen}
+                            onOpenChange={setPopoverOpen}
+                            modal
+                          >
+                            <PopoverTrigger asChild>
+                              <Button variant="secondary">Add feedback</Button>
+                            </PopoverTrigger>
+                            <PopoverContent
+                              className="w-[500px] max-h-[80vh]"
+                              side="left"
+                              align="start"
+                            >
+                              <div className="flex flex-col gap-2 h-full">
+                                <div className="flex-1 overflow-y-auto border-b max-h-[500px]">
+                                  <div className="font-medium text-sm mb-1">
+                                    Revision History:
+                                  </div>
+                                  <div>
+                                    {buildRevisionTree(
+                                      revisions,
+                                      connections
+                                    ).map((node, index) => (
+                                      <RevisionTreeNode
+                                        key={index}
+                                        node={node}
+                                        selectedIndex={selectedRevisionIndex}
+                                        onSelect={handleRevisionSelect}
+                                      />
+                                    ))}
+                                  </div>
+                                </div>
+                                <div className="flex-none pt-2">
+                                  <Textarea
+                                    placeholder="What would you like to improve?"
+                                    value={localFeedbackText}
+                                    onChange={(e) => {
+                                      setLocalFeedbackText(e.target.value);
+                                      debouncedSetFeedback(e.target.value);
+                                    }}
+                                    className="min-h-[100px] mb-2"
+                                  />
+                                  <div className="flex justify-end">
+                                    <Button
+                                      onClick={handleFeedbackSubmit}
+                                      disabled={!localFeedbackText.trim()}
+                                    >
+                                      Submit Feedback
+                                    </Button>
+                                  </div>
+                                </div>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+
+                          <Button onClick={handleSave} disabled={!editedPrompt}>
+                            Save and Overwrite
+                          </Button>
+                        </div>
+                      </>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+          </ScrollArea>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={showSaveConfirm} onOpenChange={setShowSaveConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Save Changes</AlertDialogTitle>
+            <AlertDialogDescription>
+              Would you like to clear your notes for this operation?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive hover:bg-destructive/90"
+              onClick={() => handleConfirmedSave(true)}
+            >
+              Save & Clear Notes
+            </AlertDialogAction>
+            <AlertDialogAction onClick={() => handleConfirmedSave(false)}>
+              Save & Keep Notes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

@@ -68,7 +68,7 @@ export type ColumnType<T> = {
   id?: string;
 };
 
-interface ColumnStats {
+export interface ColumnStats {
   min: number;
   max: number;
   avg: number;
@@ -102,7 +102,7 @@ function calculateDistinctValueCounts(
   return valueCounts;
 }
 
-function calculateColumnStats(
+export function calculateColumnStats(
   data: Record<string, unknown>[],
   accessor: string
 ): ColumnStats | null {
@@ -256,11 +256,13 @@ const truncateString = (str: string, maxLength: number = 20) => {
   return str.slice(0, maxLength) + "...";
 };
 
-const WordCountHistogram = memo(
+export const WordCountHistogram = memo(
   ({
     histogramData,
+    height = 60,
   }: {
     histogramData: { range: string; count: number; fullRange: string }[];
+    height?: number;
   }) => {
     // Memoize total count calculation
     const totalCount = useMemo(
@@ -280,7 +282,7 @@ const WordCountHistogram = memo(
     );
 
     return (
-      <ResponsiveContainer width="100%" height={40}>
+      <ResponsiveContainer width="100%" height={height}>
         <BarChart data={truncatedData} barCategoryGap={1}>
           <XAxis
             dataKey="range"
@@ -328,8 +330,14 @@ const WordCountHistogram = memo(
 );
 WordCountHistogram.displayName = "WordCountHistogram";
 
-const CategoricalBarChart = memo(
-  ({ data }: { data: { value: string; count: number }[] }) => {
+export const CategoricalBarChart = memo(
+  ({
+    data,
+    height = 60,
+  }: {
+    data: { value: string; count: number }[];
+    height?: number;
+  }) => {
     // Memoize total count calculation
     const totalCount = useMemo(
       () => data.reduce((sum, item) => sum + item.count, 0),
@@ -346,7 +354,7 @@ const CategoricalBarChart = memo(
     }, [data]);
 
     return (
-      <ResponsiveContainer width="100%" height={40}>
+      <ResponsiveContainer width="100%" height={height}>
         <BarChart data={displayData} barCategoryGap={1}>
           <XAxis
             dataKey="displayValue"
@@ -604,7 +612,7 @@ const ColumnHeader = memo(
                 </>
               )}
             </div>
-            <div className="h-10 w-full">
+            <div className="h-[60px] w-full">
               {stats.isLowCardinality ? (
                 <CategoricalBarChart data={stats.sortedValueCounts} />
               ) : (
@@ -1339,6 +1347,7 @@ export default function ResizableDataTable<T extends Record<string, unknown>>({
           }}
           onJumpToRow={(index) => setCurrentValueIndex(index)}
           currentOperation={currentOperation}
+          columnStats={columnStats[activeColumn]}
         />
       )}
     </div>

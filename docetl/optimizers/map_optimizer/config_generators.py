@@ -84,7 +84,7 @@ class ConfigGenerator:
 
         Determine the split key and subprompt for processing chunks of the input data.
         The split key should be a key in the input data that contains a string to be split.
-        The subprompt should be designed to process individual chunks of the split data.
+        The subprompt should be designed to process individual chunks of the split data, and only process the main chunk in within chunk delimiters if they are present.
         Note that the subprompt's output schema might be different from the original operation's output schema, since you may want to extract more information or make the information less structured/more free text. The original output schema will be preserved when combining the chunks' processed results.
 
         Important:
@@ -147,6 +147,8 @@ class ConfigGenerator:
                 result["subprompt_output_schema"][key] = "list[string]"
 
         result["subprompt_output_schema"].update(op_config["output"]["schema"])
+
+        result["subprompt"] = result["subprompt"] + " Only process the main chunk in --- Begin Main Chunk --- and --- End Main Chunk --- delimiters if they are present."
 
         self.console.log(
             f"[yellow]Breaking down operation {op_config['name']}[/yellow]"
@@ -249,11 +251,7 @@ class ConfigGenerator:
         Full input sample:
         {json.dumps(random.choice(input_data_sample), indent=2)[:1000]}
 
-        Determine if metadata is needed to perform the subtask.
-
-        Consider:
-        1. Does the input sample have any structural metadata that might be relevant to the subtask?
-        2. Is the sample chunk or full input missing any crucial information that could be in this metadata?
+        Determine if the beginning of the document has any metadata that might help with performing the subtask. For example, if there's a header, or a table of contents, or a table of information in the beginning of the document.
 
         Provide your response in the following format:
         """
